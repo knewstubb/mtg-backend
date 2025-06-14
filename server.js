@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.2: AI opponent now uses a random official precon deck.
+// Version 1.3: Replaced dynamic precon fetching with a static list for reliability.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -118,7 +118,6 @@ class Game {
     
     executeStepActions(step) {
         const player = this.players[this.activePlayerIndex];
-        // The first turn's draw step is skipped in multiplayer commander by default (we are assuming this)
         if (step === 'draw' && this.turn > 1) { 
             player.draw(1);
         } else if (step === 'draw' && this.turn === 1) {
@@ -156,20 +155,15 @@ app.use(express.json());
 
 let activeGame = null;
 
-// Fetches the list of official precon decks from Archidekt
-async function getPreconList() {
-    try {
-        const response = await fetch('https://archidekt.com/api/decks/commander-precons/');
-        const data = await response.json();
-        return data.results.map(deck => ({
-            name: deck.name,
-            id: deck.id
-        }));
-    } catch (error) {
-        console.error("Failed to fetch precon list:", error);
-        return [];
-    }
-}
+// ** NEW **: Using a static list of precons for reliability.
+const PRECON_DECK_IDS = [
+    '6394111', // Draconic Dissent (Baldur's Gate)
+    '6262947', // Upgrades Unleashed (Kamigawa)
+    '4444557', // Undead Unleashed (Innistrad)
+    '3392350', // Silverquill Statement (Strixhaven)
+    '2305822'  // Aesi's Monster-ous Wake (Commander Legends)
+];
+
 
 // Fetches a decklist from Archidekt or Moxfield
 async function fetchDecklist(url) {
@@ -238,13 +232,9 @@ app.post('/create-game', async (req, res) => {
     try {
         const playerDeck = await fetchDecklist(deckUrl);
         
-        const preconList = await getPreconList();
-        if (preconList.length === 0) {
-            throw new Error("Could not load official precon decks.");
-        }
-        
-        const randomPrecon = preconList[Math.floor(Math.random() * preconList.length)];
-        const aiDeck = await fetchDecklist(`https://archidekt.com/decks/${randomPrecon.id}`);
+        const randomPreconId = PRECON_DECK_IDS[Math.floor(Math.random() * PRECON_DECK_IDS.length)];
+        console.log(`Selected random AI precon ID: ${randomPreconId}`);
+        const aiDeck = await fetchDecklist(`https://archidekt.com/decks/${randomPreconId}`);
 
         const playerConfigs = [
             { name: 'Player 1', decklist: playerDeck.decklist, deckName: playerDeck.deckName, commanderName: playerDeck.commanderName },
