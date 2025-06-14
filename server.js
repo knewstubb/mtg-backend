@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.3: Replaced dynamic precon fetching with a static list for reliability.
+// Version 1.4: Correctly parses Commander and Mainboard from decklists.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -155,7 +155,6 @@ app.use(express.json());
 
 let activeGame = null;
 
-// ** NEW **: Using a static list of precons for reliability.
 const PRECON_DECK_IDS = [
     '6394111', // Draconic Dissent (Baldur's Gate)
     '6262947', // Upgrades Unleashed (Kamigawa)
@@ -164,8 +163,6 @@ const PRECON_DECK_IDS = [
     '2305822'  // Aesi's Monster-ous Wake (Commander Legends)
 ];
 
-
-// Fetches a decklist from Archidekt or Moxfield
 async function fetchDecklist(url) {
     let simpleCardList;
     let deckApiUrl;
@@ -191,14 +188,30 @@ async function fetchDecklist(url) {
 
     deckName = deckData.name;
 
+    // ** BUG FIX LOGIC STARTS HERE **
     if (siteName === 'Moxfield') {
-        commanderName = deckData.commanders[0]?.card?.name || 'Unknown';
-        simpleCardList = Object.values(deckData.mainboard).map(card => ({ name: card.card.name, quantity: card.quantity }));
+        const commanders = Object.values(deckData.commanders);
+        commanderName = commanders.map(c => c.card.name).join(' & ') || 'Unknown';
+
+        const allCardsInDeck = { ...deckData.mainboard, ...deckData.commanders };
+        simpleCardList = Object.values(allCardsInDeck).map(card => ({ name: card.card.name, quantity: card.quantity }));
+
     } else { // Archidekt
-        const commander = deckData.cards.find(c => c.category === "Commander");
-        commanderName = commander?.card?.oracleCard?.name || 'Unknown';
-        simpleCardList = deckData.cards.filter(c => c.category === "Mainboard").map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
+        const commanders = deckData.cards.filter(c => c.category === "Commander");
+        commanderName = commanders.map(c => c.card.oracleCard.name).join(' & ') || 'Unknown';
+        
+        // Include both Commander and Mainboard cards in the list to be built
+        const allCardsForDeck = deckData.cards.filter(c => c.category === "Mainboard" || c.category === "Commander");
+        
+        // Correctly aggregate quantities for cards that might appear in multiple slots (unlikely but safe)
+        const nameToQuantityMap = new Map();
+        allCardsForDeck.forEach(c => {
+            const name = c.card.oracleCard.name;
+            nameToQuantityMap.set(name, (nameToQuantityMap.get(name) || 0) + c.quantity);
+        });
+        simpleCardList = Array.from(nameToQuantityMap, ([name, quantity]) => ({ name, quantity }));
     }
+    // ** BUG FIX LOGIC ENDS HERE **
     
     const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
     const cardDataMap = new Map();
@@ -212,7 +225,9 @@ async function fetchDecklist(url) {
         });
         if (!scryfallResponse.ok) throw new Error('Failed to fetch a chunk of card data from Scryfall.');
         const scryfallCollection = await scryfallResponse.json();
-        scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
+        if(scryfallCollection.data) {
+           scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
+        }
     }
 
     const fullDecklist = simpleCardList.map(item => ({
@@ -222,7 +237,6 @@ async function fetchDecklist(url) {
     
     return { decklist: fullDecklist, deckName, commanderName };
 }
-
 
 app.post('/create-game', async (req, res) => {
     const { deckUrl } = req.body;
@@ -244,6 +258,7 @@ app.post('/create-game', async (req, res) => {
         activeGame = new Game(playerConfigs);
         activeGame.startGame();
         
+        // Pass the player configs to get deck/commander names
         res.json(getGameStateForClient(activeGame, playerConfigs));
 
     } catch (error) {
@@ -258,6 +273,7 @@ app.post('/next-phase', (req, res) => {
     }
     try {
         activeGame.advance();
+        // We need to retrieve the original configs to pass them again
         const playerConfigs = activeGame.players.map(p => ({ deckName: p.deckName, commanderName: p.commanderName }));
         res.json(getGameStateForClient(activeGame, playerConfigs));
     } catch (error) {
@@ -269,20 +285,27 @@ app.post('/next-phase', (req, res) => {
 function getGameStateForClient(game, playerConfigs) {
     if (!game) return null;
     const activePlayer = game.players[game.activePlayerIndex];
+    
+    // Attach deckName and commanderName to the player object before sending
+    game.players.forEach((p, index) => {
+        p.deckName = playerConfigs[index].deckName;
+        p.commanderName = playerConfigs[index].commanderName;
+    });
+
     return {
         turn: game.turn,
         phase: game.getPhase(),
         step: game.getStep(),
         activePlayerName: activePlayer.name,
-        players: game.players.map((p, index) => ({
+        players: game.players.map(p => ({
             name: p.name,
             life: p.life,
             handCount: p.hand.length,
             libraryCount: p.library.length,
             graveyardCount: p.graveyard.length,
             hand: p.name === 'Player 1' ? p.hand : [],
-            deckName: playerConfigs[index].deckName,
-            commanderName: playerConfigs[index].commanderName
+            deckName: p.deckName,
+            commanderName: p.commanderName
         }))
     };
 }
