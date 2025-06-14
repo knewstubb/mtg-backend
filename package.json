@@ -1,17 +1,17 @@
 {
   "name": "mtg-backend",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Game server for MTG Simulator",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^5.1.0",
+    "express": "^4.19.2",
     "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
