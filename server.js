@@ -1,5 +1,6 @@
 // Filename: server.js
 // This server now acts as the main game engine, creating and managing game state.
+// New in this version: Logic to advance the game turn/phase via a new endpoint.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -35,7 +36,6 @@ class Player {
         const deck = [];
         decklist.forEach(cardInfo => {
             for (let i = 0; i < cardInfo.quantity; i++) {
-                // The decklist passed in now contains the full card data
                 deck.push(new Card(cardInfo.cardData));
             }
         });
@@ -66,9 +66,15 @@ class Player {
 class Game {
     constructor(playerConfigs) {
         this.players = playerConfigs.map(config => new Player(config.name, config.decklist));
-        this.turn = 0;
-        this.phase = 'beginning';
-        this.step = 'untap';
+        this.turn = 1; // Start at turn 1
+        this.phaseOrder = ['beginning', 'precombat main', 'combat', 'postcombat main', 'ending'];
+        this.stepOrder = {
+            beginning: ['untap', 'upkeep', 'draw'],
+            combat: ['beginning of combat', 'declare attackers', 'declare blockers', 'combat damage', 'end of combat'],
+            ending: ['end', 'cleanup']
+        };
+        this.phaseIndex = 0;
+        this.stepIndex = -1; // Start before the first step
         this.activePlayerIndex = 0;
         console.log("Game created with players:", this.players.map(p => p.name).join(', '));
     }
@@ -79,7 +85,59 @@ class Game {
             player.draw(7);
         });
         this.logGameState();
-        // We won't start the turn loop automatically on the server yet.
+    }
+    
+    // ** NEW **: This method advances the game to the next step or phase.
+    advance() {
+        const currentPhase = this.phaseOrder[this.phaseIndex];
+        const stepsInPhase = this.stepOrder[currentPhase];
+
+        if (stepsInPhase) { // Phases with steps (beginning, combat, ending)
+            this.stepIndex++;
+            if (this.stepIndex < stepsInPhase.length) {
+                this.step = stepsInPhase[this.stepIndex];
+                this.executeStepActions(this.step);
+            } else {
+                this.advanceToNextPhase();
+            }
+        } else { // Phases without steps (main phases)
+             this.advanceToNextPhase();
+        }
+        
+        console.log(`Advancing to: Turn ${this.turn}, Phase: ${this.getPhase()}, Step: ${this.getStep()}`);
+        this.logGameState();
+    }
+
+    advanceToNextPhase() {
+        this.phaseIndex++;
+        this.stepIndex = -1; // Reset step index for the new phase
+        if (this.phaseIndex >= this.phaseOrder.length) {
+            // End of turn, start a new one
+            this.phaseIndex = 0;
+            this.turn++;
+            this.activePlayerIndex = (this.activePlayerIndex + 1) % this.players.length;
+        }
+        this.phase = this.phaseOrder[this.phaseIndex];
+        // Immediately advance to the first step of the new phase
+        this.advance();
+    }
+    
+    // ** NEW **: Executes automatic actions for a given step.
+    executeStepActions(step) {
+        const player = this.players[this.activePlayerIndex];
+        if (step === 'draw' && this.turn > 0) { // Don't draw on turn 0 (setup)
+            player.draw(1);
+        }
+        // More actions for untap, upkeep, etc., will be added here.
+    }
+
+    getPhase() { return this.phaseOrder[this.phaseIndex]; }
+    getStep() { 
+        const phase = this.getPhase();
+        if (this.stepOrder[phase] && this.stepIndex >= 0) {
+            return this.stepOrder[phase][this.stepIndex];
+        }
+        return 'main'; // For main phases
     }
     
     logGameState() {
@@ -96,28 +154,19 @@ class Game {
 
 
 const app = express();
-// Render provides the PORT environment variable. Default to 3000 for local development.
 const port = process.env.PORT || 3000;
 
 app.use(cors()); 
 app.use(express.json());
 
-// This will hold our active game instance.
-// For now, it only supports one game at a time.
 let activeGame = null;
 
-// Endpoint to create a new game from a deck URL
 app.post('/create-game', async (req, res) => {
     const { deckUrl } = req.body;
-
-    if (!deckUrl) {
-        return res.status(400).json({ error: 'deckUrl is required' });
-    }
-
+    if (!deckUrl) return res.status(400).json({ error: 'deckUrl is required' });
     console.log(`Received request to create game with URL: ${deckUrl}`);
 
     try {
-        // 1. Fetch the card names from Moxfield/Archidekt
         let simpleCardList;
         let deckApiUrl;
         let siteName;
@@ -134,11 +183,8 @@ app.post('/create-game', async (req, res) => {
             return res.status(400).json({ error: 'Invalid or unsupported URL' });
         }
 
-        console.log(`Fetching from ${siteName}: ${deckApiUrl}`);
         const apiResponse = await fetch(deckApiUrl);
-        if (!apiResponse.ok) {
-            throw new Error(`Failed to fetch from ${siteName}, status: ${apiResponse.status}`);
-        }
+        if (!apiResponse.ok) throw new Error(`Failed to fetch from ${siteName}, status: ${apiResponse.status}`);
         const deckData = await apiResponse.json();
 
         if (siteName === 'Moxfield') {
@@ -147,25 +193,17 @@ app.post('/create-game', async (req, res) => {
             simpleCardList = deckData.cards.map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
         }
 
-        // 2. Fetch the full card data for the deck from Scryfall in chunks
-        console.log('Fetching full card data from Scryfall...');
         const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
         const cardDataMap = new Map();
-        const chunkSize = 75; // Scryfall API limit
-        
+        const chunkSize = 75;
         for (let i = 0; i < allIdentifiers.length; i += chunkSize) {
             const chunk = allIdentifiers.slice(i, i + chunkSize);
-            console.log(`Fetching chunk ${i / chunkSize + 1}...`);
             const scryfallResponse = await fetch('https://api.scryfall.com/cards/collection', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ identifiers: chunk })
             });
-            if (!scryfallResponse.ok) {
-                 const errorBody = await scryfallResponse.json();
-                 console.error("Scryfall error:", errorBody);
-                 throw new Error('Failed to fetch a chunk of card data from Scryfall.');
-            }
+            if (!scryfallResponse.ok) throw new Error('Failed to fetch a chunk of card data from Scryfall.');
             const scryfallCollection = await scryfallResponse.json();
             scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
         }
@@ -173,32 +211,14 @@ app.post('/create-game', async (req, res) => {
         const fullDecklist = simpleCardList.map(item => ({
             quantity: item.quantity,
             cardData: cardDataMap.get(item.name)
-        })).filter(item => item.cardData); // Filter out any cards not found
+        })).filter(item => item.cardData);
 
-        // 3. Create and start the game instance on the server
-        console.log('Creating new game instance...');
-        const playerConfigs = [
-            { name: 'Player 1', decklist: fullDecklist },
-            { name: 'AI Opponent', decklist: fullDecklist } // AI uses the same deck for now
-        ];
+        const playerConfigs = [{ name: 'Player 1', decklist: fullDecklist }, { name: 'AI Opponent', decklist: fullDecklist }];
         activeGame = new Game(playerConfigs);
         activeGame.startGame();
         
-        // 4. Send the initial game state back to the frontend
-        const gameStateForClient = {
-            turn: activeGame.turn,
-            phase: activeGame.phase,
-            players: activeGame.players.map(p => ({
-                name: p.name,
-                life: p.life,
-                handCount: p.hand.length,
-                libraryCount: p.library.length,
-                graveyardCount: p.graveyard.length,
-                hand: p.name === 'Player 1' ? p.hand : [] 
-            }))
-        };
-        
-        res.json(gameStateForClient);
+        // Initial state sent after drawing hands
+        res.json(getGameStateForClient(activeGame));
 
     } catch (error) {
         console.error('Game Creation Error:', error);
@@ -206,12 +226,45 @@ app.post('/create-game', async (req, res) => {
     }
 });
 
-// Health check endpoint
+// ** NEW ENDPOINT **
+app.post('/next-phase', (req, res) => {
+    if (!activeGame) {
+        return res.status(404).json({ error: "No active game found. Please create a game first." });
+    }
+    try {
+        activeGame.advance();
+        res.json(getGameStateForClient(activeGame));
+    } catch (error) {
+        console.error("Error advancing phase:", error);
+        res.status(500).json({ error: "Failed to advance game state." });
+    }
+});
+
+// ** NEW HELPER FUNCTION **
+function getGameStateForClient(game) {
+    if (!game) return null;
+    const activePlayer = game.players[game.activePlayerIndex];
+    return {
+        turn: game.turn,
+        phase: game.getPhase(),
+        step: game.getStep(),
+        activePlayerName: activePlayer.name,
+        players: game.players.map(p => ({
+            name: p.name,
+            life: p.life,
+            handCount: p.hand.length,
+            libraryCount: p.library.length,
+            graveyardCount: p.graveyard.length,
+            hand: p.name === 'Player 1' ? p.hand : [] // Only send Player 1's hand to the client
+        }))
+    };
+}
+
+
 app.get('/health', (req, res) => {
     res.status(200).send('Server is running');
 });
 
-// IMPORTANT CHANGE FOR DEPLOYMENT: Listen on '0.0.0.0'
 app.listen(port, '0.0.0.0', () => {
     console.log(`MTG Game Server listening on port ${port}`);
 });
