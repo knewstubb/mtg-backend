@@ -1,6 +1,5 @@
 // Filename: server.js
-// This server now acts as the main game engine, creating and managing game state.
-// New in this version: Logic to advance the game turn/phase via a new endpoint.
+// Version 1.1: Fixes Archidekt import count and refines game state logic.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -66,7 +65,7 @@ class Player {
 class Game {
     constructor(playerConfigs) {
         this.players = playerConfigs.map(config => new Player(config.name, config.decklist));
-        this.turn = 1; // Start at turn 1
+        this.turn = 1; 
         this.phaseOrder = ['beginning', 'precombat main', 'combat', 'postcombat main', 'ending'];
         this.stepOrder = {
             beginning: ['untap', 'upkeep', 'draw'],
@@ -87,20 +86,18 @@ class Game {
         this.logGameState();
     }
     
-    // ** NEW **: This method advances the game to the next step or phase.
     advance() {
         const currentPhase = this.phaseOrder[this.phaseIndex];
         const stepsInPhase = this.stepOrder[currentPhase];
 
-        if (stepsInPhase) { // Phases with steps (beginning, combat, ending)
+        if (stepsInPhase) {
             this.stepIndex++;
-            if (this.stepIndex < stepsInPhase.length) {
-                this.step = stepsInPhase[this.stepIndex];
-                this.executeStepActions(this.step);
-            } else {
+            if (this.stepIndex >= stepsInPhase.length) {
                 this.advanceToNextPhase();
+            } else {
+                this.executeStepActions(stepsInPhase[this.stepIndex]);
             }
-        } else { // Phases without steps (main phases)
+        } else { 
              this.advanceToNextPhase();
         }
         
@@ -110,25 +107,23 @@ class Game {
 
     advanceToNextPhase() {
         this.phaseIndex++;
-        this.stepIndex = -1; // Reset step index for the new phase
+        this.stepIndex = -1;
         if (this.phaseIndex >= this.phaseOrder.length) {
-            // End of turn, start a new one
             this.phaseIndex = 0;
             this.turn++;
             this.activePlayerIndex = (this.activePlayerIndex + 1) % this.players.length;
         }
-        this.phase = this.phaseOrder[this.phaseIndex];
-        // Immediately advance to the first step of the new phase
         this.advance();
     }
     
-    // ** NEW **: Executes automatic actions for a given step.
     executeStepActions(step) {
         const player = this.players[this.activePlayerIndex];
-        if (step === 'draw' && this.turn > 0) { // Don't draw on turn 0 (setup)
+        // The first turn's draw step is skipped in multiplayer commander by default (we are assuming this)
+        if (step === 'draw' && this.turn > 1) { 
             player.draw(1);
+        } else if (step === 'draw' && this.turn === 1) {
+            console.log(`${player.name} skips their first draw step.`);
         }
-        // More actions for untap, upkeep, etc., will be added here.
     }
 
     getPhase() { return this.phaseOrder[this.phaseIndex]; }
@@ -137,7 +132,7 @@ class Game {
         if (this.stepOrder[phase] && this.stepIndex >= 0) {
             return this.stepOrder[phase][this.stepIndex];
         }
-        return 'main'; // For main phases
+        return 'main';
     }
     
     logGameState() {
@@ -189,8 +184,9 @@ app.post('/create-game', async (req, res) => {
 
         if (siteName === 'Moxfield') {
             simpleCardList = Object.values(deckData.mainboard).map(card => ({ name: card.card.name, quantity: card.quantity }));
-        } else {
-            simpleCardList = deckData.cards.map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
+        } else { // Archidekt
+            // ** BUG FIX **: Filter for mainboard cards only to get correct count
+            simpleCardList = deckData.cards.filter(c => c.category === "Mainboard").map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
         }
 
         const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
@@ -217,7 +213,6 @@ app.post('/create-game', async (req, res) => {
         activeGame = new Game(playerConfigs);
         activeGame.startGame();
         
-        // Initial state sent after drawing hands
         res.json(getGameStateForClient(activeGame));
 
     } catch (error) {
@@ -226,7 +221,6 @@ app.post('/create-game', async (req, res) => {
     }
 });
 
-// ** NEW ENDPOINT **
 app.post('/next-phase', (req, res) => {
     if (!activeGame) {
         return res.status(404).json({ error: "No active game found. Please create a game first." });
@@ -240,7 +234,6 @@ app.post('/next-phase', (req, res) => {
     }
 });
 
-// ** NEW HELPER FUNCTION **
 function getGameStateForClient(game) {
     if (!game) return null;
     const activePlayer = game.players[game.activePlayerIndex];
@@ -255,11 +248,10 @@ function getGameStateForClient(game) {
             handCount: p.hand.length,
             libraryCount: p.library.length,
             graveyardCount: p.graveyard.length,
-            hand: p.name === 'Player 1' ? p.hand : [] // Only send Player 1's hand to the client
+            hand: p.name === 'Player 1' ? p.hand : [] 
         }))
     };
 }
-
 
 app.get('/health', (req, res) => {
     res.status(200).send('Server is running');
