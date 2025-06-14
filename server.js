@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.1: Fixes Archidekt import count and refines game state logic.
+// Version 1.2: AI opponent now uses a random official precon deck.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -156,64 +156,105 @@ app.use(express.json());
 
 let activeGame = null;
 
+// Fetches the list of official precon decks from Archidekt
+async function getPreconList() {
+    try {
+        const response = await fetch('https://archidekt.com/api/decks/commander-precons/');
+        const data = await response.json();
+        return data.results.map(deck => ({
+            name: deck.name,
+            id: deck.id
+        }));
+    } catch (error) {
+        console.error("Failed to fetch precon list:", error);
+        return [];
+    }
+}
+
+// Fetches a decklist from Archidekt or Moxfield
+async function fetchDecklist(url) {
+    let simpleCardList;
+    let deckApiUrl;
+    let siteName;
+    let deckName = 'Custom Deck';
+    let commanderName = 'Unknown';
+
+    if (url.includes('moxfield.com/decks/')) {
+        const deckId = url.split('/decks/')[1].split('/')[0];
+        deckApiUrl = `https://api.moxfield.com/v2/decks/all/${deckId}`;
+        siteName = 'Moxfield';
+    } else if (url.includes('archidekt.com/decks/')) {
+        const deckId = url.split('/decks/')[1].split('/')[0];
+        deckApiUrl = `https://archidekt.com/api/decks/${deckId}/`;
+        siteName = 'Archidekt';
+    } else {
+        throw new Error('Invalid or unsupported URL');
+    }
+
+    const apiResponse = await fetch(deckApiUrl);
+    if (!apiResponse.ok) throw new Error(`Failed to fetch from ${siteName}, status: ${apiResponse.status}`);
+    const deckData = await apiResponse.json();
+
+    deckName = deckData.name;
+
+    if (siteName === 'Moxfield') {
+        commanderName = deckData.commanders[0]?.card?.name || 'Unknown';
+        simpleCardList = Object.values(deckData.mainboard).map(card => ({ name: card.card.name, quantity: card.quantity }));
+    } else { // Archidekt
+        const commander = deckData.cards.find(c => c.category === "Commander");
+        commanderName = commander?.card?.oracleCard?.name || 'Unknown';
+        simpleCardList = deckData.cards.filter(c => c.category === "Mainboard").map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
+    }
+    
+    const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
+    const cardDataMap = new Map();
+    const chunkSize = 75;
+    for (let i = 0; i < allIdentifiers.length; i += chunkSize) {
+        const chunk = allIdentifiers.slice(i, i + chunkSize);
+        const scryfallResponse = await fetch('https://api.scryfall.com/cards/collection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifiers: chunk })
+        });
+        if (!scryfallResponse.ok) throw new Error('Failed to fetch a chunk of card data from Scryfall.');
+        const scryfallCollection = await scryfallResponse.json();
+        scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
+    }
+
+    const fullDecklist = simpleCardList.map(item => ({
+        quantity: item.quantity,
+        cardData: cardDataMap.get(item.name)
+    })).filter(item => item.cardData);
+    
+    return { decklist: fullDecklist, deckName, commanderName };
+}
+
+
 app.post('/create-game', async (req, res) => {
     const { deckUrl } = req.body;
     if (!deckUrl) return res.status(400).json({ error: 'deckUrl is required' });
     console.log(`Received request to create game with URL: ${deckUrl}`);
 
     try {
-        let simpleCardList;
-        let deckApiUrl;
-        let siteName;
-
-        if (deckUrl.includes('moxfield.com/decks/')) {
-            const deckId = deckUrl.split('/decks/')[1].split('/')[0];
-            deckApiUrl = `https://api.moxfield.com/v2/decks/all/${deckId}`;
-            siteName = 'Moxfield';
-        } else if (deckUrl.includes('archidekt.com/decks/')) {
-            const deckId = deckUrl.split('/decks/')[1].split('/')[0];
-            deckApiUrl = `https://archidekt.com/api/decks/${deckId}/`;
-            siteName = 'Archidekt';
-        } else {
-            return res.status(400).json({ error: 'Invalid or unsupported URL' });
+        const playerDeck = await fetchDecklist(deckUrl);
+        
+        const preconList = await getPreconList();
+        if (preconList.length === 0) {
+            throw new Error("Could not load official precon decks.");
         }
+        
+        const randomPrecon = preconList[Math.floor(Math.random() * preconList.length)];
+        const aiDeck = await fetchDecklist(`https://archidekt.com/decks/${randomPrecon.id}`);
 
-        const apiResponse = await fetch(deckApiUrl);
-        if (!apiResponse.ok) throw new Error(`Failed to fetch from ${siteName}, status: ${apiResponse.status}`);
-        const deckData = await apiResponse.json();
+        const playerConfigs = [
+            { name: 'Player 1', decklist: playerDeck.decklist, deckName: playerDeck.deckName, commanderName: playerDeck.commanderName },
+            { name: 'AI Opponent', decklist: aiDeck.decklist, deckName: aiDeck.deckName, commanderName: aiDeck.commanderName }
+        ];
 
-        if (siteName === 'Moxfield') {
-            simpleCardList = Object.values(deckData.mainboard).map(card => ({ name: card.card.name, quantity: card.quantity }));
-        } else { // Archidekt
-            // ** BUG FIX **: Filter for mainboard cards only to get correct count
-            simpleCardList = deckData.cards.filter(c => c.category === "Mainboard").map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
-        }
-
-        const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
-        const cardDataMap = new Map();
-        const chunkSize = 75;
-        for (let i = 0; i < allIdentifiers.length; i += chunkSize) {
-            const chunk = allIdentifiers.slice(i, i + chunkSize);
-            const scryfallResponse = await fetch('https://api.scryfall.com/cards/collection', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ identifiers: chunk })
-            });
-            if (!scryfallResponse.ok) throw new Error('Failed to fetch a chunk of card data from Scryfall.');
-            const scryfallCollection = await scryfallResponse.json();
-            scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
-        }
-
-        const fullDecklist = simpleCardList.map(item => ({
-            quantity: item.quantity,
-            cardData: cardDataMap.get(item.name)
-        })).filter(item => item.cardData);
-
-        const playerConfigs = [{ name: 'Player 1', decklist: fullDecklist }, { name: 'AI Opponent', decklist: fullDecklist }];
         activeGame = new Game(playerConfigs);
         activeGame.startGame();
         
-        res.json(getGameStateForClient(activeGame));
+        res.json(getGameStateForClient(activeGame, playerConfigs));
 
     } catch (error) {
         console.error('Game Creation Error:', error);
@@ -227,14 +268,15 @@ app.post('/next-phase', (req, res) => {
     }
     try {
         activeGame.advance();
-        res.json(getGameStateForClient(activeGame));
+        const playerConfigs = activeGame.players.map(p => ({ deckName: p.deckName, commanderName: p.commanderName }));
+        res.json(getGameStateForClient(activeGame, playerConfigs));
     } catch (error) {
         console.error("Error advancing phase:", error);
         res.status(500).json({ error: "Failed to advance game state." });
     }
 });
 
-function getGameStateForClient(game) {
+function getGameStateForClient(game, playerConfigs) {
     if (!game) return null;
     const activePlayer = game.players[game.activePlayerIndex];
     return {
@@ -242,13 +284,15 @@ function getGameStateForClient(game) {
         phase: game.getPhase(),
         step: game.getStep(),
         activePlayerName: activePlayer.name,
-        players: game.players.map(p => ({
+        players: game.players.map((p, index) => ({
             name: p.name,
             life: p.life,
             handCount: p.hand.length,
             libraryCount: p.library.length,
             graveyardCount: p.graveyard.length,
-            hand: p.name === 'Player 1' ? p.hand : [] 
+            hand: p.name === 'Player 1' ? p.hand : [],
+            deckName: playerConfigs[index].deckName,
+            commanderName: playerConfigs[index].commanderName
         }))
     };
 }
