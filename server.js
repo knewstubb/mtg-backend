@@ -147,19 +147,28 @@ app.post('/create-game', async (req, res) => {
             simpleCardList = deckData.cards.map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
         }
 
-        // 2. Fetch the full card data for the deck from Scryfall
+        // 2. Fetch the full card data for the deck from Scryfall in chunks
         console.log('Fetching full card data from Scryfall...');
-        const identifiers = simpleCardList.map(card => ({ name: card.name }));
-        const scryfallResponse = await fetch('https://api.scryfall.com/cards/collection', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ identifiers })
-        });
-        if (!scryfallResponse.ok) throw new Error('Failed to fetch card data from Scryfall.');
-        
-        const scryfallCollection = await scryfallResponse.json();
+        const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
         const cardDataMap = new Map();
-        scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
+        const chunkSize = 75; // Scryfall API limit
+        
+        for (let i = 0; i < allIdentifiers.length; i += chunkSize) {
+            const chunk = allIdentifiers.slice(i, i + chunkSize);
+            console.log(`Fetching chunk ${i / chunkSize + 1}...`);
+            const scryfallResponse = await fetch('https://api.scryfall.com/cards/collection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ identifiers: chunk })
+            });
+            if (!scryfallResponse.ok) {
+                 const errorBody = await scryfallResponse.json();
+                 console.error("Scryfall error:", errorBody);
+                 throw new Error('Failed to fetch a chunk of card data from Scryfall.');
+            }
+            const scryfallCollection = await scryfallResponse.json();
+            scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
+        }
 
         const fullDecklist = simpleCardList.map(item => ({
             quantity: item.quantity,
@@ -176,7 +185,6 @@ app.post('/create-game', async (req, res) => {
         activeGame.startGame();
         
         // 4. Send the initial game state back to the frontend
-        // We only send the data the frontend needs, not the whole game object with methods
         const gameStateForClient = {
             turn: activeGame.turn,
             phase: activeGame.phase,
@@ -186,8 +194,6 @@ app.post('/create-game', async (req, res) => {
                 handCount: p.hand.length,
                 libraryCount: p.library.length,
                 graveyardCount: p.graveyard.length,
-                // For a real game, we would NOT send the actual hand contents to all players
-                // But for now, let's send our own hand to our client
                 hand: p.name === 'Player 1' ? p.hand : [] 
             }))
         };
@@ -198,6 +204,11 @@ app.post('/create-game', async (req, res) => {
         console.error('Game Creation Error:', error);
         res.status(500).json({ error: error.message });
     }
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.status(200).send('Server is running');
 });
 
 // IMPORTANT CHANGE FOR DEPLOYMENT: Listen on '0.0.0.0'
