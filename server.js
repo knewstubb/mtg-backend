@@ -96,7 +96,8 @@ class Game {
 
 
 const app = express();
-const port = 3000;
+// Render provides the PORT environment variable. Default to 3000 for local development.
+const port = process.env.PORT || 3000;
 
 app.use(cors()); 
 app.use(express.json());
@@ -199,6 +200,7 @@ app.post('/create-game', async (req, res) => {
     }
 });
 
-app.listen(port, () => {
-    console.log(`MTG Game Server listening at http://localhost:${port}`);
+// IMPORTANT CHANGE FOR DEPLOYMENT: Listen on '0.0.0.0'
+app.listen(port, '0.0.0.0', () => {
+    console.log(`MTG Game Server listening on port ${port}`);
 });
