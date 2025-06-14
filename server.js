@@ -5,10 +5,6 @@ const express = require('express');
 const fetch = require('node-fetch');
 const cors = require('cors');
 
-// We need to tell Node.js how to import our game logic classes.
-// In a real project, we would use module.exports in game.js. For simplicity here,
-// we'll just include the class definitions directly.
-
 // --- Start: Inlined from game.js ---
 class Card {
     constructor(cardData) {
@@ -147,4 +143,62 @@ app.post('/create-game', async (req, res) => {
         if (siteName === 'Moxfield') {
             simpleCardList = Object.values(deckData.mainboard).map(card => ({ name: card.card.name, quantity: card.quantity }));
         } else {
-            simpleCardL
+            simpleCardList = deckData.cards.map(card => ({ name: card.card.oracleCard.name, quantity: card.quantity }));
+        }
+
+        // 2. Fetch the full card data for the deck from Scryfall
+        console.log('Fetching full card data from Scryfall...');
+        const identifiers = simpleCardList.map(card => ({ name: card.name }));
+        const scryfallResponse = await fetch('https://api.scryfall.com/cards/collection', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ identifiers })
+        });
+        if (!scryfallResponse.ok) throw new Error('Failed to fetch card data from Scryfall.');
+        
+        const scryfallCollection = await scryfallResponse.json();
+        const cardDataMap = new Map();
+        scryfallCollection.data.forEach(card => cardDataMap.set(card.name, card));
+
+        const fullDecklist = simpleCardList.map(item => ({
+            quantity: item.quantity,
+            cardData: cardDataMap.get(item.name)
+        })).filter(item => item.cardData); // Filter out any cards not found
+
+        // 3. Create and start the game instance on the server
+        console.log('Creating new game instance...');
+        const playerConfigs = [
+            { name: 'Player 1', decklist: fullDecklist },
+            { name: 'AI Opponent', decklist: fullDecklist } // AI uses the same deck for now
+        ];
+        activeGame = new Game(playerConfigs);
+        activeGame.startGame();
+        
+        // 4. Send the initial game state back to the frontend
+        // We only send the data the frontend needs, not the whole game object with methods
+        const gameStateForClient = {
+            turn: activeGame.turn,
+            phase: activeGame.phase,
+            players: activeGame.players.map(p => ({
+                name: p.name,
+                life: p.life,
+                handCount: p.hand.length,
+                libraryCount: p.library.length,
+                graveyardCount: p.graveyard.length,
+                // For a real game, we would NOT send the actual hand contents to all players
+                // But for now, let's send our own hand to our client
+                hand: p.name === 'Player 1' ? p.hand : [] 
+            }))
+        };
+        
+        res.json(gameStateForClient);
+
+    } catch (error) {
+        console.error('Game Creation Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.listen(port, () => {
+    console.log(`MTG Game Server listening at http://localhost:${port}`);
+});
