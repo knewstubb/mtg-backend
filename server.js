@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.5: Adds a new endpoint to export deck data as a CSV file.
+// Version 1.5: Improved error handling to provide more specific messages from APIs.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -175,7 +175,21 @@ async function fetchDecklist(url) {
     }
 
     const apiResponse = await fetch(deckApiUrl);
-    if (!apiResponse.ok) throw new Error(`Failed to fetch from ${siteName}, status: ${apiResponse.status}`);
+    
+    // ** NEW: Better error handling **
+    if (!apiResponse.ok) {
+        let errorDetails = `Failed to fetch from ${siteName}, status: ${apiResponse.status}`;
+        try {
+            const errorJson = await apiResponse.json();
+            if (errorJson.detail) {
+                errorDetails += `. Reason: ${errorJson.detail}`; // e.g., "Not found."
+            }
+        } catch (e) {
+            // Ignore if the error response isn't valid JSON
+        }
+        throw new Error(errorDetails);
+    }
+    
     const deckData = await apiResponse.json();
 
     deckName = deckData.name;
@@ -256,7 +270,6 @@ app.post('/next-phase', (req, res) => {
     }
 });
 
-// ** NEW ENDPOINT for CSV Export **
 app.post('/export-csv', async (req, res) => {
     const { deckUrl } = req.body;
     if (!deckUrl) return res.status(400).json({ error: 'deckUrl is required' });
@@ -264,48 +277,32 @@ app.post('/export-csv', async (req, res) => {
 
     try {
         const { decklist, deckName } = await fetchDecklist(deckUrl);
-
-        // Function to escape CSV fields
         const escapeCsvField = (field) => {
-            if (field === null || field === undefined) {
-                return '';
-            }
+            if (field === null || field === undefined) return '';
             const stringField = String(field);
-            // Wrap in quotes if it contains a comma, double quote, or newline
             if (stringField.includes(',') || stringField.includes('"') || stringField.includes('\n')) {
-                // Escape double quotes by doubling them
                 return `"${stringField.replace(/"/g, '""')}"`;
             }
             return stringField;
         };
-
         const headers = ["Quantity", "Name", "Mana Cost", "Type Line", "Oracle Text", "Power", "Toughness"];
         let csvContent = headers.join(',') + '\r\n';
-
         decklist.forEach(item => {
             const card = item.cardData;
             const row = [
-                item.quantity,
-                card.name,
-                card.manaCost || '',
-                card.typeLine,
-                card.oracleText || '',
-                card.power || '',
-                card.toughness || ''
+                item.quantity, card.name, card.manaCost || '', card.typeLine,
+                card.oracleText || '', card.power || '', card.toughness || ''
             ].map(escapeCsvField).join(',');
             csvContent += row + '\r\n';
         });
-
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename="${deckName.replace(/ /g, '_')}.csv"`);
         res.status(200).send(csvContent);
-
     } catch (error) {
         console.error("CSV Export Error:", error);
         res.status(500).json({ error: "Failed to generate CSV file." });
     }
 });
-
 
 function getGameStateForClient(game, playerConfigs) {
     if (!game) return null;
