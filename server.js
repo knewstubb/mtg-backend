@@ -132,7 +132,7 @@ async function fetchDecklist(url) {
 
     if (url.includes('archidekt.com/decks/')) {
         const deckId = url.split('/decks/')[1].split('/')[0];
-        deckApiUrl = `https://archidekt.com/api/decks/${deckId}/export/txt`;
+        deckApiUrl = `https://archidekt.com/decks/${deckId}/export/txt`;
         siteName = 'Archidekt';
     } else {
         throw new Error('Only Archidekt URLs are supported at this time.');
