@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.4: Correctly parses Commander and Mainboard from decklists.
+// Version 1.5: Adds a new endpoint to export deck data as a CSV file.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -73,7 +73,7 @@ class Game {
             ending: ['end', 'cleanup']
         };
         this.phaseIndex = 0;
-        this.stepIndex = -1; // Start before the first step
+        this.stepIndex = -1;
         this.activePlayerIndex = 0;
         console.log("Game created with players:", this.players.map(p => p.name).join(', '));
     }
@@ -156,19 +156,11 @@ app.use(express.json());
 let activeGame = null;
 
 const PRECON_DECK_IDS = [
-    '6394111', // Draconic Dissent (Baldur's Gate)
-    '6262947', // Upgrades Unleashed (Kamigawa)
-    '4444557', // Undead Unleashed (Innistrad)
-    '3392350', // Silverquill Statement (Strixhaven)
-    '2305822'  // Aesi's Monster-ous Wake (Commander Legends)
+    '6394111', '6262947', '4444557', '3392350', '2305822'
 ];
 
 async function fetchDecklist(url) {
-    let simpleCardList;
-    let deckApiUrl;
-    let siteName;
-    let deckName = 'Custom Deck';
-    let commanderName = 'Unknown';
+    let simpleCardList, deckApiUrl, siteName, deckName = 'Custom Deck', commanderName = 'Unknown';
 
     if (url.includes('moxfield.com/decks/')) {
         const deckId = url.split('/decks/')[1].split('/')[0];
@@ -188,22 +180,15 @@ async function fetchDecklist(url) {
 
     deckName = deckData.name;
 
-    // ** BUG FIX LOGIC STARTS HERE **
     if (siteName === 'Moxfield') {
         const commanders = Object.values(deckData.commanders);
         commanderName = commanders.map(c => c.card.name).join(' & ') || 'Unknown';
-
         const allCardsInDeck = { ...deckData.mainboard, ...deckData.commanders };
         simpleCardList = Object.values(allCardsInDeck).map(card => ({ name: card.card.name, quantity: card.quantity }));
-
-    } else { // Archidekt
+    } else {
         const commanders = deckData.cards.filter(c => c.category === "Commander");
         commanderName = commanders.map(c => c.card.oracleCard.name).join(' & ') || 'Unknown';
-        
-        // Include both Commander and Mainboard cards in the list to be built
         const allCardsForDeck = deckData.cards.filter(c => c.category === "Mainboard" || c.category === "Commander");
-        
-        // Correctly aggregate quantities for cards that might appear in multiple slots (unlikely but safe)
         const nameToQuantityMap = new Map();
         allCardsForDeck.forEach(c => {
             const name = c.card.oracleCard.name;
@@ -211,7 +196,6 @@ async function fetchDecklist(url) {
         });
         simpleCardList = Array.from(nameToQuantityMap, ([name, quantity]) => ({ name, quantity }));
     }
-    // ** BUG FIX LOGIC ENDS HERE **
     
     const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
     const cardDataMap = new Map();
@@ -245,22 +229,15 @@ app.post('/create-game', async (req, res) => {
 
     try {
         const playerDeck = await fetchDecklist(deckUrl);
-        
         const randomPreconId = PRECON_DECK_IDS[Math.floor(Math.random() * PRECON_DECK_IDS.length)];
-        console.log(`Selected random AI precon ID: ${randomPreconId}`);
         const aiDeck = await fetchDecklist(`https://archidekt.com/decks/${randomPreconId}`);
-
         const playerConfigs = [
             { name: 'Player 1', decklist: playerDeck.decklist, deckName: playerDeck.deckName, commanderName: playerDeck.commanderName },
             { name: 'AI Opponent', decklist: aiDeck.decklist, deckName: aiDeck.deckName, commanderName: aiDeck.commanderName }
         ];
-
         activeGame = new Game(playerConfigs);
         activeGame.startGame();
-        
-        // Pass the player configs to get deck/commander names
         res.json(getGameStateForClient(activeGame, playerConfigs));
-
     } catch (error) {
         console.error('Game Creation Error:', error);
         res.status(500).json({ error: error.message });
@@ -268,12 +245,9 @@ app.post('/create-game', async (req, res) => {
 });
 
 app.post('/next-phase', (req, res) => {
-    if (!activeGame) {
-        return res.status(404).json({ error: "No active game found. Please create a game first." });
-    }
+    if (!activeGame) return res.status(404).json({ error: "No active game found." });
     try {
         activeGame.advance();
-        // We need to retrieve the original configs to pass them again
         const playerConfigs = activeGame.players.map(p => ({ deckName: p.deckName, commanderName: p.commanderName }));
         res.json(getGameStateForClient(activeGame, playerConfigs));
     } catch (error) {
@@ -282,38 +256,74 @@ app.post('/next-phase', (req, res) => {
     }
 });
 
+// ** NEW ENDPOINT for CSV Export **
+app.post('/export-csv', async (req, res) => {
+    const { deckUrl } = req.body;
+    if (!deckUrl) return res.status(400).json({ error: 'deckUrl is required' });
+    console.log(`Received request to export CSV for URL: ${deckUrl}`);
+
+    try {
+        const { decklist, deckName } = await fetchDecklist(deckUrl);
+
+        // Function to escape CSV fields
+        const escapeCsvField = (field) => {
+            if (field === null || field === undefined) {
+                return '';
+            }
+            const stringField = String(field);
+            // Wrap in quotes if it contains a comma, double quote, or newline
+            if (stringField.includes(',') || stringField.includes('"') || stringField.includes('\n')) {
+                // Escape double quotes by doubling them
+                return `"${stringField.replace(/"/g, '""')}"`;
+            }
+            return stringField;
+        };
+
+        const headers = ["Quantity", "Name", "Mana Cost", "Type Line", "Oracle Text", "Power", "Toughness"];
+        let csvContent = headers.join(',') + '\r\n';
+
+        decklist.forEach(item => {
+            const card = item.cardData;
+            const row = [
+                item.quantity,
+                card.name,
+                card.manaCost || '',
+                card.typeLine,
+                card.oracleText || '',
+                card.power || '',
+                card.toughness || ''
+            ].map(escapeCsvField).join(',');
+            csvContent += row + '\r\n';
+        });
+
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="${deckName.replace(/ /g, '_')}.csv"`);
+        res.status(200).send(csvContent);
+
+    } catch (error) {
+        console.error("CSV Export Error:", error);
+        res.status(500).json({ error: "Failed to generate CSV file." });
+    }
+});
+
+
 function getGameStateForClient(game, playerConfigs) {
     if (!game) return null;
     const activePlayer = game.players[game.activePlayerIndex];
-    
-    // Attach deckName and commanderName to the player object before sending
     game.players.forEach((p, index) => {
         p.deckName = playerConfigs[index].deckName;
         p.commanderName = playerConfigs[index].commanderName;
     });
-
     return {
-        turn: game.turn,
-        phase: game.getPhase(),
-        step: game.getStep(),
-        activePlayerName: activePlayer.name,
+        turn: game.turn, phase: game.getPhase(), step: game.getStep(), activePlayerName: activePlayer.name,
         players: game.players.map(p => ({
-            name: p.name,
-            life: p.life,
-            handCount: p.hand.length,
-            libraryCount: p.library.length,
-            graveyardCount: p.graveyard.length,
-            hand: p.name === 'Player 1' ? p.hand : [],
-            deckName: p.deckName,
-            commanderName: p.commanderName
+            name: p.name, life: p.life, handCount: p.hand.length, libraryCount: p.library.length,
+            graveyardCount: p.graveyard.length, hand: p.name === 'Player 1' ? p.hand : [],
+            deckName: p.deckName, commanderName: p.commanderName
         }))
     };
 }
 
-app.get('/health', (req, res) => {
-    res.status(200).send('Server is running');
-});
+app.get('/health', (req, res) => res.status(200).send('Server is running'));
 
-app.listen(port, '0.0.0.0', () => {
-    console.log(`MTG Game Server listening on port ${port}`);
-});
+app.listen(port, '0.0.0.0', () => console.log(`MTG Game Server listening on port ${port}`));
