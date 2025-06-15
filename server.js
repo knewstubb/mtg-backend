@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.7: Adds a User-Agent header to bypass 403 Forbidden errors from APIs.
+// Version 2.0 (Final): Refactored to exclusively use the reliable Archidekt API.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -159,62 +159,38 @@ const PRECON_DECK_IDS = [
     '6394111', '6262947', '4444557', '3392350', '2305822'
 ];
 
-async function fetchDecklist(url) {
-    let simpleCardList, deckApiUrl, siteName, deckName = 'Custom Deck', commanderName = 'Unknown';
-
-    if (url.includes('moxfield.com/decks/')) {
-        const deckId = url.split('/decks/')[1].split('/')[0];
-        deckApiUrl = `https://api.moxfield.com/v2/decks/all/${deckId}`;
-        siteName = 'Moxfield';
-    } else if (url.includes('archidekt.com/decks/')) {
-        const deckId = url.split('/decks/')[1].split('/')[0];
-        deckApiUrl = `https://archidekt.com/api/decks/${deckId}/`;
-        siteName = 'Archidekt';
-    } else {
-        throw new Error('Invalid or unsupported URL');
-    }
-
-    const apiResponse = await fetch(deckApiUrl, {
-        // ** THE FIX IS HERE **: Add a User-Agent header to look like a browser
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
-        }
-    });
+async function fetchArchidektDeck(deckId) {
+    const deckApiUrl = `https://archidekt.com/api/decks/${deckId}/`;
+    
+    const apiResponse = await fetch(deckApiUrl);
     
     if (!apiResponse.ok) {
-        let errorDetails = `Failed to fetch from ${siteName}, status: ${apiResponse.status}`;
+        let errorDetails = `Failed to fetch from Archidekt, status: ${apiResponse.status}`;
         try {
             const errorJson = await apiResponse.json();
             if (errorJson.detail) {
-                errorDetails += `. Reason: ${errorJson.detail}`;
+                errorDetails += `. Reason: ${errorJson.detail}. Please ensure the deck is public.`;
             }
         } catch (e) { /* Ignore JSON parsing errors */ }
         throw new Error(errorDetails);
     }
     
     const deckData = await apiResponse.json();
+    const deckName = deckData.name;
 
-    deckName = deckData.name;
-
-    if (siteName === 'Moxfield') {
-        const commanders = Object.values(deckData.commanders);
-        commanderName = commanders.map(c => c.card.name).join(' & ') || 'Unknown';
-        const allCardsInDeck = { ...deckData.mainboard, ...deckData.commanders };
-        simpleCardList = Object.values(allCardsInDeck).map(card => ({ name: card.card.name, quantity: card.quantity }));
-    } else {
-        const commanders = deckData.cards.filter(c => c.category === "Commander");
-        commanderName = commanders.map(c => c.card.oracleCard.name).join(' & ') || 'Unknown';
-        const allCardsForDeck = deckData.cards.filter(c => c.category === "Mainboard" || c.category === "Commander");
-        const nameToQuantityMap = new Map();
-        allCardsForDeck.forEach(c => {
-            const name = c.card.oracleCard.name;
-            nameToQuantityMap.set(name, (nameToQuantityMap.get(name) || 0) + c.quantity);
-        });
-        simpleCardList = Array.from(nameToQuantityMap, ([name, quantity]) => ({ name, quantity }));
-    }
+    const commanders = deckData.cards.filter(c => c.category === "Commander");
+    const commanderName = commanders.map(c => c.card.oracleCard.name).join(' & ') || 'Unknown';
+    const allCardsForDeck = deckData.cards.filter(c => c.category === "Mainboard" || c.category === "Commander");
     
+    const nameToQuantityMap = new Map();
+    allCardsForDeck.forEach(c => {
+        const name = c.card.oracleCard.name;
+        nameToQuantityMap.set(name, (nameToQuantityMap.get(name) || 0) + c.quantity);
+    });
+    const simpleCardList = Array.from(nameToQuantityMap, ([name, quantity]) => ({ name, quantity }));
+
     if (!simpleCardList || simpleCardList.length === 0) {
-        throw new Error(`The deck from ${siteName} appears to be empty or private. No cards were found.`);
+        throw new Error(`The deck from Archidekt appears to be empty or private. No cards were found.`);
     }
 
     const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
@@ -248,9 +224,15 @@ app.post('/create-game', async (req, res) => {
     console.log(`Received request to create game with URL: ${deckUrl}`);
 
     try {
-        const playerDeck = await fetchDecklist(deckUrl);
+        if (!deckUrl.includes('archidekt.com/decks/')) {
+            throw new Error('Invalid URL. Please use a public Archidekt URL.');
+        }
+        const playerDeckId = deckUrl.split('/decks/')[1].split('/')[0];
+        const playerDeck = await fetchArchidektDeck(playerDeckId);
+        
         const randomPreconId = PRECON_DECK_IDS[Math.floor(Math.random() * PRECON_DECK_IDS.length)];
-        const aiDeck = await fetchDecklist(`https://archidekt.com/decks/${randomPreconId}`);
+        const aiDeck = await fetchArchidektDeck(randomPreconId);
+
         const playerConfigs = [
             { name: 'Player 1', decklist: playerDeck.decklist, deckName: playerDeck.deckName, commanderName: playerDeck.commanderName },
             { name: 'AI Opponent', decklist: aiDeck.decklist, deckName: aiDeck.deckName, commanderName: aiDeck.commanderName }
@@ -264,25 +246,18 @@ app.post('/create-game', async (req, res) => {
     }
 });
 
-app.post('/next-phase', (req, res) => {
-    if (!activeGame) return res.status(404).json({ error: "No active game found." });
-    try {
-        activeGame.advance();
-        const playerConfigs = activeGame.players.map(p => ({ deckName: p.deckName, commanderName: p.commanderName }));
-        res.json(getGameStateForClient(activeGame, playerConfigs));
-    } catch (error) {
-        console.error("Error advancing phase:", error);
-        res.status(500).json({ error: "Failed to advance game state." });
-    }
-});
-
 app.post('/export-csv', async (req, res) => {
     const { deckUrl } = req.body;
     if (!deckUrl) return res.status(400).json({ error: 'deckUrl is required' });
     console.log(`Received request to export CSV for URL: ${deckUrl}`);
 
     try {
-        const { decklist, deckName } = await fetchDecklist(deckUrl);
+        if (!deckUrl.includes('archidekt.com/decks/')) {
+            throw new Error('Invalid URL. Please use a public Archidekt URL.');
+        }
+        const deckId = deckUrl.split('/decks/')[1].split('/')[0];
+        const { decklist, deckName } = await fetchArchidektDeck(deckId);
+        
         const escapeCsvField = (field) => {
             if (field === null || field === undefined) return '';
             const stringField = String(field);
@@ -307,6 +282,19 @@ app.post('/export-csv', async (req, res) => {
     } catch (error) {
         console.error("CSV Export Error:", error);
         res.status(500).json({ error: "Failed to generate CSV file." });
+    }
+});
+
+
+app.post('/next-phase', (req, res) => {
+    if (!activeGame) return res.status(404).json({ error: "No active game found." });
+    try {
+        activeGame.advance();
+        const playerConfigs = activeGame.players.map(p => ({ deckName: p.deckName, commanderName: p.commanderName }));
+        res.json(getGameStateForClient(activeGame, playerConfigs));
+    } catch (error) {
+        console.error("Error advancing phase:", error);
+        res.status(500).json({ error: "Failed to advance game state." });
     }
 });
 
