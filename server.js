@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.5: Improved error handling to provide more specific messages from APIs.
+// Version 1.6: Adds a check to ensure a decklist is not empty after fetching.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -176,17 +176,14 @@ async function fetchDecklist(url) {
 
     const apiResponse = await fetch(deckApiUrl);
     
-    // ** NEW: Better error handling **
     if (!apiResponse.ok) {
         let errorDetails = `Failed to fetch from ${siteName}, status: ${apiResponse.status}`;
         try {
             const errorJson = await apiResponse.json();
             if (errorJson.detail) {
-                errorDetails += `. Reason: ${errorJson.detail}`; // e.g., "Not found."
+                errorDetails += `. Reason: ${errorJson.detail}`;
             }
-        } catch (e) {
-            // Ignore if the error response isn't valid JSON
-        }
+        } catch (e) { /* Ignore JSON parsing errors */ }
         throw new Error(errorDetails);
     }
     
@@ -211,6 +208,11 @@ async function fetchDecklist(url) {
         simpleCardList = Array.from(nameToQuantityMap, ([name, quantity]) => ({ name, quantity }));
     }
     
+    // ** NEW: Error check for empty deck **
+    if (!simpleCardList || simpleCardList.length === 0) {
+        throw new Error(`The deck from ${siteName} appears to be empty or private. No cards were found.`);
+    }
+
     const allIdentifiers = simpleCardList.map(card => ({ name: card.name }));
     const cardDataMap = new Map();
     const chunkSize = 75;
