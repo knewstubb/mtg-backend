@@ -1,5 +1,5 @@
 // Filename: server.js
-// Version 1.6: Adds a check to ensure a decklist is not empty after fetching.
+// Version 1.7: Adds a User-Agent header to bypass 403 Forbidden errors from APIs.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -174,7 +174,12 @@ async function fetchDecklist(url) {
         throw new Error('Invalid or unsupported URL');
     }
 
-    const apiResponse = await fetch(deckApiUrl);
+    const apiResponse = await fetch(deckApiUrl, {
+        // ** THE FIX IS HERE **: Add a User-Agent header to look like a browser
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
+        }
+    });
     
     if (!apiResponse.ok) {
         let errorDetails = `Failed to fetch from ${siteName}, status: ${apiResponse.status}`;
@@ -208,7 +213,6 @@ async function fetchDecklist(url) {
         simpleCardList = Array.from(nameToQuantityMap, ([name, quantity]) => ({ name, quantity }));
     }
     
-    // ** NEW: Error check for empty deck **
     if (!simpleCardList || simpleCardList.length === 0) {
         throw new Error(`The deck from ${siteName} appears to be empty or private. No cards were found.`);
     }
